@@ -25,7 +25,7 @@ from ._2to3 import url_quote_plus
 from .document import Document
 from .design_document import DesignDocument
 from .views import View
-from .indexes import Index, SearchIndex, SpecialIndex
+from .indexes import Index, TextIndex, SpecialIndex
 from .index_constants import JSON_INDEX_TYPE
 from .index_constants import TEXT_INDEX_TYPE
 from .index_constants import SPECIAL_INDEX_TYPE
@@ -110,22 +110,30 @@ class CouchDatabase(dict):
     def create_document(self, data, throw_on_exists=False):
         """
         Creates a new document in the remote and locally cached database, using
-        the data provided, assuming that there is an _id field provided.
+        the data provided.  If an _id is included in the data then depending on
+        that _id either a :class:`~cloudant.document.Document` or a
+        :class:`~cloudant.design_document.DesignDocument`
+        object will be added to the locally cached database and returned by this
+        method.
 
         :param dict data: Dictionary of document JSON data, containing _id.
         :param bool throw_on_exists: Optional flag dictating whether to raise
             an exception if the document already exists in the database.
 
-        :returns: Document instance corresponding to the new document in the
-            database
+        :returns: A :class:`~cloudant.document.Document` or
+            :class:`~cloudant.design_document.DesignDocument` instance
+            corresponding to the new document in the database.
         """
-        docid = data.get('_id')
-        doc = Document(self, docid)
-        if throw_on_exists:
-            if doc.exists():
-                raise CloudantException(
-                    'Error - Document with id {0} already exists.'.format(docid)
-                    )
+        docid = data.get('_id', None)
+        doc = None
+        if docid and docid.startswith('_design/'):
+            doc = DesignDocument(self, docid)
+        else:
+            doc = Document(self, docid)
+        if throw_on_exists and doc.exists():
+            raise CloudantException(
+                'Error - Document with id {0} already exists.'.format(docid)
+            )
         doc.update(data)
         doc.create()
         super(CouchDatabase, self).__setitem__(doc['_id'], doc)
@@ -721,31 +729,45 @@ class CloudantDatabase(CouchDatabase):
         url = posixpath.join(self._database_host, *parts)
         return url
 
-    def share_database(self, username, reader=True, writer=False, admin=False):
+    def share_database(self, username, roles=None):
         """
         Shares the current remote database with the username provided.
         You can grant varying degrees of access rights,
-        default is to share read-only, but writing or admin
-        permissions can be added by setting the appropriate flags
-        If the user already has this database shared with them it
-        will modify/overwrite the existing permissions.
+        default is to share read-only, but additional
+        roles can be added by providing the specific roles as a
+        ``list`` argument.  If the user already has this database shared with
+        them then it will modify/overwrite the existing permissions.
 
         :param str username: Cloudant user to share the database with.
-        :param bool reader: Grant named user read access if True.
-        :param bool writer: Grant named user write access if True.
-        :param bool admin: Grant named user admin access if True.
+        :param list roles: A list of
+            `roles <https://docs.cloudant.com/authorization.html#roles>`_
+            to grant to the named user.
 
         :returns: Share database status in JSON format
         """
+        if roles is None:
+            roles = ['_reader']
+        valid_roles = [
+            '_reader',
+            '_writer',
+            '_admin',
+            '_replicator',
+            '_db_updates',
+            '_design',
+            '_shards',
+            '_security'
+        ]
         doc = self.security_document()
         data = doc.get('cloudant', {})
         perms = []
-        if reader:
-            perms.append('_reader')
-        if writer:
-            perms.append('_writer')
-        if admin:
-            perms.append('_admin')
+        if all(role in valid_roles for role in roles):
+            perms = list(set(roles))
+
+        if not perms:
+            msg = (
+                'Invalid role(s) provided: {0}.  Valid roles are: {1}.'
+            ).format(roles, valid_roles)
+            raise CloudantArgumentError(msg)
 
         data[username] = perms
         doc['cloudant'] = data
@@ -794,17 +816,17 @@ class CloudantDatabase(CouchDatabase):
 
         return resp.json()
 
-    def get_all_indexes(self, raw_result=False):
+    def get_query_indexes(self, raw_result=False):
         """
-        Retrieves indexes from the remote database.
+        Retrieves query indexes from the remote database.
 
         :param bool raw_result: If set to True then the raw JSON content for
             the request is returned.  Default is to return a list containing
             :class:`~cloudant.indexes.Index`,
-            :class:`~cloudant.indexes.SearchIndex`, and
+            :class:`~cloudant.indexes.TextIndex`, and
             :class:`~cloudant.indexes.SpecialIndex` wrapped objects.
 
-        :returns: The indexes in the database
+        :returns: The query indexes in the database
         """
 
         url = posixpath.join(self.database_url, '_index')
@@ -824,7 +846,7 @@ class CloudantDatabase(CouchDatabase):
                     **data.get('def', {})
                 ))
             elif data.get('type') == TEXT_INDEX_TYPE:
-                indexes.append(SearchIndex(
+                indexes.append(TextIndex(
                     self,
                     data.get('ddoc'),
                     data.get('name'),
@@ -841,7 +863,7 @@ class CloudantDatabase(CouchDatabase):
                 raise CloudantException('Unexpected index content: {0} found.')
         return indexes
 
-    def create_index(
+    def create_query_index(
             self,
             design_document_id=None,
             index_name=None,
@@ -849,7 +871,7 @@ class CloudantDatabase(CouchDatabase):
             **kwargs
     ):
         """
-        Creates either a JSON or a text index in the remote database.
+        Creates either a JSON or a text query index in the remote database.
 
         :param str index_type: The type of the index to create.  Can
             be either 'text' or 'json'.  Defaults to 'json'.
@@ -885,7 +907,7 @@ class CloudantDatabase(CouchDatabase):
         if index_type == JSON_INDEX_TYPE:
             index = Index(self, design_document_id, index_name, **kwargs)
         elif index_type == TEXT_INDEX_TYPE:
-            index = SearchIndex(self, design_document_id, index_name, **kwargs)
+            index = TextIndex(self, design_document_id, index_name, **kwargs)
         else:
             msg = (
                 'Invalid index type: {0}.  '
@@ -895,10 +917,10 @@ class CloudantDatabase(CouchDatabase):
         index.create()
         return index
 
-    def delete_index(self, design_document_id, index_type, index_name):
+    def delete_query_index(self, design_document_id, index_type, index_name):
         """
-        Deletes the index identified by the design document id, index type and
-        index name from the remote database.
+        Deletes the query index identified by the design document id,
+        index type and index name from the remote database.
 
         :param str design_document_id: The design document id that the index
             exists in.
@@ -909,7 +931,7 @@ class CloudantDatabase(CouchDatabase):
         if index_type == JSON_INDEX_TYPE:
             index = Index(self, design_document_id, index_name)
         elif index_type == TEXT_INDEX_TYPE:
-            index = SearchIndex(self, design_document_id, index_name)
+            index = TextIndex(self, design_document_id, index_name)
         else:
             msg = (
                 'Invalid index type: {0}.  '

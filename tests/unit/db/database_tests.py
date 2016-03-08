@@ -32,7 +32,7 @@ from cloudant.result import Result, QueryResult
 from cloudant.errors import CloudantException, CloudantArgumentError
 from cloudant.document import Document
 from cloudant.design_document import DesignDocument
-from cloudant.indexes import Index, SearchIndex, SpecialIndex
+from cloudant.indexes import Index, TextIndex, SpecialIndex
 
 from .unit_t_db_base import UnitTestDbBase
 from ... import unicode_
@@ -153,6 +153,8 @@ class DatabaseTests(UnitTestDbBase):
         self.assertTrue(doc['_rev'].startswith('1-'))
         self.assertEqual(doc['name'], data['name'])
         self.assertEqual(doc['age'], data['age'])
+        self.assertIsInstance(doc, Document)
+        self.assertIsInstance(self.db['julia06'], Document)
         try:
             self.db.create_document(data, throw_on_exists=True)
             self.fail('Above statement should raise a CloudantException')
@@ -172,6 +174,23 @@ class DatabaseTests(UnitTestDbBase):
         self.assertTrue(doc['_rev'].startswith('1-'))
         self.assertEqual(doc['name'], data['name'])
         self.assertEqual(doc['age'], data['age'])
+        self.assertIsInstance(doc, Document)
+        self.assertIsInstance(self.db[doc['_id']], Document)
+
+    def test_create_design_document(self):
+        """
+        Test creating a document using a supplied document id
+        """
+        data = {'_id': '_design/julia06', 'name': 'julia', 'age': 6}
+        doc = self.db.create_document(data)
+        self.assertEqual(self.db['_design/julia06'], doc)
+        self.assertEqual(doc['_id'], data['_id'])
+        self.assertTrue(doc['_rev'].startswith('1-'))
+        self.assertEqual(doc['name'], data['name'])
+        self.assertEqual(doc['age'], data['age'])
+        self.assertEqual(doc.views, dict())
+        self.assertIsInstance(doc, DesignDocument)
+        self.assertIsInstance(self.db['_design/julia06'], DesignDocument)
 
     def test_create_empty_document(self):
         """
@@ -611,23 +630,83 @@ class CloudantDatabaseTests(UnitTestDbBase):
         super(CloudantDatabaseTests, self).tearDown()
 
     def test_get_security_document(self):
-        self.assertDictEqual(self.db.security_document(), dict())
-        share = 'unit-test-share-user-{0}'.format(unicode_(uuid.uuid4()))
+        """
+        Test the retrieval of the security document.
+        """
+        share = 'user-{0}'.format(unicode_(uuid.uuid4()))
         self.db.share_database(share)
         expected = {'cloudant': {share: ['_reader']}}
         self.assertDictEqual(self.db.security_document(), expected)
 
-    def test_share_unshare_database(self):
-        share = 'unit-test-share-user-{0}'.format(unicode_(uuid.uuid4()))
+    def test_share_database_default_permissions(self):
+        """
+        Test the sharing of a database applying default permissions.
+        """
         self.assertDictEqual(self.db.security_document(), dict())
-        self.assertDictEqual(self.db.share_database(share), {'ok': True})
+        share = 'user-{0}'.format(unicode_(uuid.uuid4()))
+        self.db.share_database(share)
         expected = {'cloudant': {share: ['_reader']}}
         self.assertDictEqual(self.db.security_document(), expected)
-        self.assertDictEqual(
-            self.db.share_database(share, True, True, True),
-            {'ok': True}
+
+    def test_share_database(self):
+        """
+        Test the sharing of a database.
+        """
+        self.assertDictEqual(self.db.security_document(), dict())
+        share = 'user-{0}'.format(unicode_(uuid.uuid4()))
+        self.db.share_database(share, ['_writer', '_replicator'])
+        expected = {'cloudant': {share: ['_writer', '_replicator']}}
+        self.assertDictEqual(self.db.security_document(), expected)
+
+    def test_share_database_with_redundant_role_entries(self):
+        """
+        Test the sharing of a database works when the list of roles contains
+        valid entries but some entries are duplicates.
+        """
+        self.assertDictEqual(self.db.security_document(), dict())
+        share = 'user-{0}'.format(unicode_(uuid.uuid4()))
+        self.db.share_database(share, ['_writer', '_replicator', '_writer'])
+        expected = {'cloudant': {share: ['_writer', '_replicator']}}
+        self.assertDictEqual(self.db.security_document(), expected)
+
+    def test_share_database_invalid_role(self):
+        """
+        Test the sharing of a database fails when provided an invalid role.
+        """
+        share = 'user-{0}'.format(unicode_(uuid.uuid4()))
+        with self.assertRaises(CloudantArgumentError) as cm:
+            self.db.share_database(share, ['_writer', '_invalid_role'])
+        err = cm.exception
+        self.assertEqual(
+            str(err),
+            'Invalid role(s) provided: '
+            '[\'_writer\', \'_invalid_role\'].  Valid roles are: '
+            '[\'_reader\', \'_writer\', \'_admin\', \'_replicator\', '
+            '\'_db_updates\', \'_design\', \'_shards\', \'_security\'].'
         )
-        expected = {'cloudant': {share: ['_reader', '_writer', '_admin']}}
+
+    def test_share_database_empty_role_list(self):
+        """
+        Test the sharing of a database fails when provided an empty role list.
+        """
+        share = 'user-{0}'.format(unicode_(uuid.uuid4()))
+        with self.assertRaises(CloudantArgumentError) as cm:
+            self.db.share_database(share, [])
+        err = cm.exception
+        self.assertEqual(
+            str(err),
+            'Invalid role(s) provided: [].  Valid roles are: '
+            '[\'_reader\', \'_writer\', \'_admin\', \'_replicator\', '
+            '\'_db_updates\', \'_design\', \'_shards\', \'_security\'].'
+        )
+
+    def test_unshare_database(self):
+        """
+        Test the un-sharing of a database from a specified user.
+        """
+        share = 'user-{0}'.format(unicode_(uuid.uuid4()))
+        self.db.share_database(share)
+        expected = {'cloudant': {share: ['_reader']}}
         self.assertDictEqual(self.db.security_document(), expected)
         self.assertDictEqual(self.db.unshare_database(share), {'ok': True})
         self.assertDictEqual(self.db.security_document(), {'cloudant': dict()})
@@ -751,7 +830,7 @@ class CloudantDatabaseTests(UnitTestDbBase):
         """
         Ensure that a JSON index is created as expected.
         """
-        index = self.db.create_index(fields=['name', 'age'])
+        index = self.db.create_query_index(fields=['name', 'age'])
         self.assertIsInstance(index, Index)
         ddoc = self.db[index.design_document_id]
         self.assertTrue(ddoc['_rev'].startswith('1-'))
@@ -771,18 +850,19 @@ class CloudantDatabaseTests(UnitTestDbBase):
         """
         Ensure that a text index is created as expected.
         """
-        index = self.db.create_index(
+        index = self.db.create_query_index(
             index_type='text',
             fields=[{'name': 'name', 'type':'string'},
                     {'name': 'age', 'type':'number'}]
         )
-        self.assertIsInstance(index, SearchIndex)
+        self.assertIsInstance(index, TextIndex)
         ddoc = self.db[index.design_document_id]
         self.assertTrue(ddoc['_rev'].startswith('1-'))
         self.assertEqual(ddoc,
                 {'_id': index.design_document_id,
                  '_rev': ddoc['_rev'],
                  'language': 'query',
+                 'views': {},
                  'indexes': {index.name: {'index': {'index_array_lengths': True,
                                 'fields': [{'name': 'name', 'type': 'string'},
                                            {'name': 'age', 'type': 'number'}],
@@ -798,14 +878,15 @@ class CloudantDatabaseTests(UnitTestDbBase):
         """
         Ensure that a text index is created for all fields as expected.
         """
-        index = self.db.create_index(index_type='text')
-        self.assertIsInstance(index, SearchIndex)
+        index = self.db.create_query_index(index_type='text')
+        self.assertIsInstance(index, TextIndex)
         ddoc = self.db[index.design_document_id]
         self.assertTrue(ddoc['_rev'].startswith('1-'))
         self.assertEqual(ddoc,
                 {'_id': index.design_document_id,
                  '_rev': ddoc['_rev'],
                  'language': 'query',
+                 'views': {},
                  'indexes': {index.name: {'index': {'index_array_lengths': True,
                                 'fields': 'all_fields',
                                 'default_field': {},
@@ -821,20 +902,20 @@ class CloudantDatabaseTests(UnitTestDbBase):
         Tests that multiple indexes of different types can be stored in one
         design document.
         """
-        json_index = self.db.create_index(
+        json_index = self.db.create_query_index(
             'ddoc001',
             'json-index-001',
             fields=['name', 'age']
         )
         self.assertIsInstance(json_index, Index)
-        search_index = self.db.create_index(
+        search_index = self.db.create_query_index(
             'ddoc001',
             'text-index-001',
             'text',
             fields=[{'name': 'name', 'type':'string'},
                     {'name': 'age', 'type':'number'}]
         )
-        self.assertIsInstance(search_index, SearchIndex)
+        self.assertIsInstance(search_index, TextIndex)
         ddoc = self.db['_design/ddoc001']
         self.assertTrue(ddoc['_rev'].startswith('2-'))
         self.assertEqual(ddoc,
@@ -860,13 +941,13 @@ class CloudantDatabaseTests(UnitTestDbBase):
                                    'fields': {'$default': 'standard'}}}}}
             )
     
-    def test_create_index_failure(self):
+    def test_create_query_index_failure(self):
         """
         Tests that a type of something other than 'json' or 'text' will cause
         failure.
         """
         with self.assertRaises(CloudantArgumentError) as cm:
-            self.db.create_index(
+            self.db.create_query_index(
                 None,
                 '_all_docs',
                 'special',
@@ -883,34 +964,34 @@ class CloudantDatabaseTests(UnitTestDbBase):
         """
         Ensure that a JSON index is deleted as expected.
         """
-        index = self.db.create_index(
+        index = self.db.create_query_index(
             'ddoc001',
             'index001',
             fields=['name', 'age'])
         self.assertIsInstance(index, Index)
         ddoc = self.db['_design/ddoc001']
         self.assertTrue(ddoc.exists())
-        self.db.delete_index('ddoc001', 'json', 'index001')
+        self.db.delete_query_index('ddoc001', 'json', 'index001')
         self.assertFalse(ddoc.exists())
 
     def test_delete_text_index(self):
         """
         Ensure that a text index is deleted as expected.
         """
-        index = self.db.create_index('ddoc001', 'index001', 'text')
-        self.assertIsInstance(index, SearchIndex)
+        index = self.db.create_query_index('ddoc001', 'index001', 'text')
+        self.assertIsInstance(index, TextIndex)
         ddoc = self.db['_design/ddoc001']
         self.assertTrue(ddoc.exists())
-        self.db.delete_index('ddoc001', 'text', 'index001')
+        self.db.delete_query_index('ddoc001', 'text', 'index001')
         self.assertFalse(ddoc.exists())
 
-    def test_delete_index_failure(self):
+    def test_delete_query_index_failure(self):
         """
         Tests that a type of something other than 'json' or 'text' will cause
         failure.
         """
         with self.assertRaises(CloudantArgumentError) as cm:
-            self.db.delete_index(None, 'special', '_all_docs')
+            self.db.delete_query_index(None, 'special', '_all_docs')
         err = cm.exception
         self.assertEqual(
             str(err),
@@ -918,14 +999,15 @@ class CloudantDatabaseTests(UnitTestDbBase):
             'Index type must be either \"json\" or \"text\"'
         )
 
-    def test_get_all_indexes_raw(self):
+    def test_get_query_indexes_raw(self):
         """
-        Tests getting all indexes from the _index endpoint in JSON format.
+        Tests getting all query indexes from the _index endpoint in
+        JSON format.
         """
-        self.db.create_index('ddoc001', 'json-idx-001', fields=['name', 'age'])
-        self.db.create_index('ddoc001', 'text-idx-001', 'text')
+        self.db.create_query_index('ddoc001', 'json-idx-001', fields=['name', 'age'])
+        self.db.create_query_index('ddoc001', 'text-idx-001', 'text')
         self.assertEqual(
-            self.db.get_all_indexes(raw_result=True),
+            self.db.get_query_indexes(raw_result=True),
             {'indexes': [
                 {'ddoc': None,
                  'name': '_all_docs',
@@ -946,20 +1028,21 @@ class CloudantDatabaseTests(UnitTestDbBase):
             ]}
         )
 
-    def test_get_all_indexes(self):
+    def test_get_query_indexes(self):
         """
-        Tests getting all indexes from the _index endpoint wrapped as Index.
+        Tests getting all query indexes from the _index endpoint
+        wrapped as Index, TextIndex, and SpecialIndex.
         """
-        self.db.create_index('ddoc001', 'json-idx-001', fields=['name', 'age'])
-        self.db.create_index('ddoc001', 'text-idx-001', 'text')
-        indexes = self.db.get_all_indexes()
+        self.db.create_query_index('ddoc001', 'json-idx-001', fields=['name', 'age'])
+        self.db.create_query_index('ddoc001', 'text-idx-001', 'text')
+        indexes = self.db.get_query_indexes()
         self.assertIsInstance(indexes[0], SpecialIndex)
         self.assertIsNone(indexes[0].design_document_id)
         self.assertEqual(indexes[0].name, '_all_docs')
         self.assertIsInstance(indexes[1], Index)
         self.assertEqual(indexes[1].design_document_id, '_design/ddoc001')
         self.assertEqual(indexes[1].name, 'json-idx-001')
-        self.assertIsInstance(indexes[2], SearchIndex)
+        self.assertIsInstance(indexes[2], TextIndex)
         self.assertEqual(indexes[2].design_document_id, '_design/ddoc001')
         self.assertEqual(indexes[2].name, 'text-idx-001')
 
